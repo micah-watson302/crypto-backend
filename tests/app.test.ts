@@ -1,13 +1,14 @@
 import request from 'supertest'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { FALLBACK_COINS, setCoins } from '../src/config/coins.js'
 import { createApp } from '../src/app.js'
 import { priceStore } from '../src/modules/market/market.store.js'
-import { COINS } from '../src/config/coins.js'
 
 const app = createApp()
 
 describe('API', () => {
   beforeEach(() => {
+    setCoins(FALLBACK_COINS)
     priceStore.takeChanges()
   })
 
@@ -30,10 +31,22 @@ describe('API', () => {
     expect((await request(app).get('/ready')).status).toBe(200)
   })
 
-  it('GET /api/coins lists tracked coins', async () => {
-    const res = await request(app).get('/api/coins')
+  it('GET /api/coins returns a paginated page from the store', async () => {
+    const res = await request(app).get(
+      '/api/coins?limit=3&offset=0&sort=name&order=asc',
+    )
     expect(res.status).toBe(200)
-    expect(res.body).toHaveLength(COINS.length)
+    expect(res.body.items).toHaveLength(3)
+    expect(res.body.total).toBe(FALLBACK_COINS.length)
+    expect(res.body.limit).toBe(3)
+    expect(res.body.order).toBe('asc')
+    expect(res.body.items[0]).toHaveProperty('live')
+  })
+
+  it('GET /api/coins/symbols returns symbol strings only', async () => {
+    const res = await request(app).get('/api/coins/symbols')
+    expect(res.status).toBe(200)
+    expect(res.body).toContain('BTC')
   })
 
   it('GET /api/coins/:symbol is case-insensitive and 404s on unknown', async () => {

@@ -7,7 +7,7 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   CORS_ORIGIN: z
     .string()
-    .default('http://localhost:5173')
+    .default('http://localhost:3000,http://127.0.0.1:3000')
     .transform((v) =>
       v
         .split(',')
@@ -18,7 +18,8 @@ const schema = z.object({
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
     .default('info'),
   PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
-  CANDLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
+  // Freshness window for candle cache; stale data may still be served longer
+  CANDLE_TTL_MS: z.coerce.number().int().positive().default(300_000),
 })
 
 const checked = schema.superRefine((cfg, ctx) => {

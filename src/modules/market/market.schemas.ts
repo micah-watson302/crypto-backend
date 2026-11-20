@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { COINS } from '../../config/coins.js'
+import { isKnownSymbol } from '../../config/coins.js'
 
 export const GRANULARITIES = [60, 300, 900, 3600, 21600, 86400] as const
 
@@ -7,7 +7,7 @@ export const symbolSchema = z
   .string()
   .trim()
   .toUpperCase()
-  .refine((s) => COINS.some((c) => c.symbol === s), {
+  .refine((s) => isKnownSymbol(s), {
     message: 'Unknown coin symbol',
   })
 

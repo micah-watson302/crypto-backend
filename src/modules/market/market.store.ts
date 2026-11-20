@@ -1,10 +1,26 @@
 import type { Price } from './market.types.js'
 
+function isSamePrice(a: Price, b: Price): boolean {
+  return (
+    a.price === b.price &&
+    a.change24h === b.change24h &&
+    a.high24h === b.high24h &&
+    a.low24h === b.low24h &&
+    a.volume24h === b.volume24h
+  )
+}
+
 export class PriceStore {
   private prices = new Map<string, Price>()
   private dirty = new Set<string>() // symbols changed since last takeChanges()
 
   set(price: Price): void {
+    const prev = this.prices.get(price.symbol)
+    if (prev && isSamePrice(prev, price)) {
+      // Keep latest timestamp without broadcasting a no-op update
+      this.prices.set(price.symbol, { ...prev, updatedAt: price.updatedAt })
+      return
+    }
     this.prices.set(price.symbol, price)
     this.dirty.add(price.symbol)
   }

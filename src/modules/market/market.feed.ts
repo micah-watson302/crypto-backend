@@ -1,6 +1,6 @@
 import ky from 'ky'
-import WebSocket from 'ws'
-import { COINS } from '../../config/coins.js'
+import { getCoins } from '../../config/coins.js'
+import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import type { PriceStore } from './market.store.js'
 
@@ -9,130 +9,79 @@ const log = logger.child({ module: 'market-feed' })
 const MIN_BACKOFF_MS = 1_000
 const MAX_BACKOFF_MS = 30_000
 
-interface BulletResponse {
+interface AllTickersResponse {
   code: string
   data: {
-    token: string
-    instanceServers: { endpoint: string; pingInterval: number }[]
+    ticker: {
+      symbol: string
+      last: string
+      changeRate: string
+      high: string
+      low: string
+      vol: string
+    }[]
   }
 }
 
-interface SnapshotData {
-  symbol: string
-  lastTradedPrice: string
-  high: string
-  low: string
-  vol: string
-  changeRate: string // a fraction, e.g. 0.012 means +1.2%
-}
-
-interface KucoinMessage {
-  type: string
-  topic?: string
-  data?: { data?: SnapshotData } | string
-}
-
+/**
+ * Poll KuCoin allTickers for every tracked USDT pair.
+ * Per-symbol WebSocket snapshots cannot cover 800+ markets (KuCoin caps
+ * subscriptions at 300/session), so REST allTickers is the scalable path
+ * while staying on the same KuCoin data source.
+ */
 export function startMarketFeed(store: PriceStore): () => void {
-  const symbols = COINS.map((c) => `${c.symbol}-USDT`)
-  let ws: WebSocket | undefined
-  let pingTimer: NodeJS.Timeout | undefined
-  let retryTimer: NodeJS.Timeout | undefined
-  let backoff = MIN_BACKOFF_MS
   let stopped = false
+  let timer: NodeJS.Timeout | undefined
+  let backoff = MIN_BACKOFF_MS
 
-  function handleMessage(raw: string): void {
-    const msg = JSON.parse(raw) as KucoinMessage
-
-    if (msg.type === 'error') {
-      log.error({ message: msg.data }, 'KuCoin rejected a message')
-      return
-    }
-    if (msg.type !== 'message' || !msg.topic?.startsWith('/market/snapshot:'))
-      return
-
-    const d = typeof msg.data === 'object' ? msg.data?.data : undefined
-    if (!d) return
-
-    store.set({
-      symbol: d.symbol.replace('-USDT', ''),
-      price: Number(d.lastTradedPrice),
-      change24h: Math.round(Number(d.changeRate) * 10_000) / 100,
-      high24h: Number(d.high),
-      low24h: Number(d.low),
-      volume24h: Number(d.vol),
-      updatedAt: Date.now(),
-    })
-  }
-
-  function scheduleRetry(): void {
-    if (stopped) return
-    log.warn({ retryInMs: backoff }, 'disconnected, retrying')
-    retryTimer = setTimeout(() => void connect(), backoff)
-    backoff = Math.min(backoff * 2, MAX_BACKOFF_MS)
-  }
-
-  async function connect(): Promise<void> {
+  async function poll(): Promise<void> {
     if (stopped) return
     try {
-      // Each connection needs a fresh token and server address
       const res = await ky
-        .post('https://api.kucoin.com/api/v1/bullet-public', {
-          timeout: 10_000,
+        .get('https://api.kucoin.com/api/v1/market/allTickers', {
+          timeout: 15_000,
+          headers: { 'User-Agent': 'crypto-backend' },
         })
-        .json<BulletResponse>()
-      const server = res.data.instanceServers[0]
-      if (!server) throw new Error('KuCoin returned no WebSocket servers')
-      const url = `${server.endpoint}?token=${res.data.token}&connectId=${Date.now()}`
+        .json<AllTickersResponse>()
 
-      ws = new WebSocket(url)
+      const known = new Set(getCoins().map((c) => c.symbol))
+      const now = Date.now()
+      let applied = 0
 
-      ws.on('message', (data) => {
-        try {
-          const msg = JSON.parse(data.toString()) as KucoinMessage
-          if (msg.type === 'welcome') {
-            // Subscribe to one snapshot topic per coin
-            for (const symbol of symbols) {
-              ws?.send(
-                JSON.stringify({
-                  id: Date.now(),
-                  type: 'subscribe',
-                  topic: `/market/snapshot:${symbol}`,
-                  response: true,
-                }),
-              )
-            }
-            // Keep the connection alive at the interval the server asked for
-            pingTimer = setInterval(() => {
-              ws?.send(JSON.stringify({ id: Date.now(), type: 'ping' }))
-            }, server.pingInterval)
-            backoff = MIN_BACKOFF_MS
-            log.info({ coins: symbols.length }, 'connected to KuCoin')
-            return
-          }
-          handleMessage(data.toString())
-        } catch (err) {
-          log.warn({ err }, 'bad message from KuCoin')
-        }
-      })
+      for (const ticker of res.data?.ticker ?? []) {
+        if (!ticker.symbol.endsWith('-USDT')) continue
+        const symbol = ticker.symbol.slice(0, -5)
+        if (!known.has(symbol)) continue
 
-      ws.on('error', (err) => log.error({ err: err.message }, 'socket error'))
+        const price = Number(ticker.last)
+        if (!Number.isFinite(price)) continue
 
-      ws.on('close', () => {
-        clearInterval(pingTimer)
-        scheduleRetry()
-      })
+        store.set({
+          symbol,
+          price,
+          change24h: Math.round(Number(ticker.changeRate) * 10_000) / 100,
+          high24h: Number(ticker.high),
+          low24h: Number(ticker.low),
+          volume24h: Number(ticker.vol),
+          updatedAt: now,
+        })
+        applied += 1
+      }
+
+      backoff = MIN_BACKOFF_MS
+      log.debug({ applied }, 'polled KuCoin allTickers')
+      timer = setTimeout(() => void poll(), env.PUSH_INTERVAL_MS)
     } catch (err) {
-      log.error({ err: (err as Error).message }, 'could not get KuCoin token')
-      scheduleRetry()
+      log.error({ err: (err as Error).message }, 'allTickers poll failed')
+      timer = setTimeout(() => void poll(), backoff)
+      backoff = Math.min(backoff * 2, MAX_BACKOFF_MS)
     }
   }
 
-  void connect()
+  void poll()
 
   return () => {
     stopped = true
-    clearInterval(pingTimer)
-    clearTimeout(retryTimer)
-    ws?.close()
+    clearTimeout(timer)
   }
 }

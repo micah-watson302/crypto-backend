@@ -15,16 +15,22 @@ describe('TtlCache', () => {
     expect(loader).toHaveBeenCalledTimes(1)
   })
 
-  it('calls the loader again after the TTL expires', async () => {
+  it('serves stale data immediately and refreshes in the background', async () => {
     vi.useFakeTimers()
     const cache = new TtlCache<number>(1_000)
-    const loader = vi.fn(async () => 1)
+    let value = 1
+    const loader = vi.fn(async () => value++)
 
-    await cache.get('btc', loader)
+    expect(await cache.get('btc', loader)).toBe(1)
     vi.advanceTimersByTime(1_001)
-    await cache.get('btc', loader)
+
+    // Expired: still returns stale payload right away
+    expect(await cache.get('btc', loader)).toBe(1)
+    await vi.runAllTimersAsync()
+    await Promise.resolve()
 
     expect(loader).toHaveBeenCalledTimes(2)
+    expect(await cache.get('btc', loader)).toBe(2)
   })
 
   it('keeps separate entries per key', async () => {

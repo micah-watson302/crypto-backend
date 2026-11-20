@@ -27,15 +27,24 @@ All variables are optional. See `.env.example`.
 | `PORT`             | `4000`                  | HTTP and Socket.IO port                     |
 | `CORS_ORIGIN`      | `http://localhost:5173` | Allowed browser origin                      |
 | `LOG_LEVEL`        | `info`                  | Pino log level                              |
-| `PUSH_INTERVAL_MS` | `1000`                  | Interval for batched `prices:update` events |
+| `PUSH_INTERVAL_MS` | `1000`                  | Poll + Socket.IO batch interval (ms)        |
 | `CANDLE_TTL_MS`    | `60000`                 | Candle cache lifetime                       |
 
 Invalid values stop the server at startup with a clear error.
 
 ## Coins
 
-Configured in `src/config/coins.ts`, each traded against USDT on KuCoin:
-BTC, ETH, SOL, XRP, ADA, DOGE, LTC, LINK, <NINTH>.
+On startup the server loads **all tradable USDT pairs** from KuCoin
+(`GET /api/v1/symbols` + currency names), typically 800+. The list refreshes
+every 6 hours.
+
+Live prices come from KuCoin `GET /api/v1/market/allTickers` (polled every
+`PUSH_INTERVAL_MS`). Per-symbol WebSocket snapshots cannot cover the full
+market (KuCoin limits ~300 subscriptions/session), so allTickers is the
+scalable path on the same data source.
+
+If KuCoin is unreachable at boot, a small fallback list is used until the
+next successful refresh.
 
 ## Scripts
 
@@ -109,9 +118,10 @@ interface Coin {
 | ------ | ---------------------------------------------- | --------------------------------------------------------------------------------- |
 | GET    | `/health`                                      | Liveness check, 200                                                               |
 | GET    | `/ready`                                       | `{ ready: boolean, pricesLoaded: number }`; 200 once prices have loaded, else 503 |
-| GET    | `/api/coins`                                   | `Coin[]`                                                                          |
+| GET    | `/api/coins?limit=40&offset=0&sort=volume&q=`  | Paginated page from memory: `{ items, total, limit, offset, sort, q }`            |
+| GET    | `/api/coins/symbols`                           | `string[]` of symbols (no prices)                                                 |
 | GET    | `/api/coins/:symbol`                           | `Coin` (symbol is case-insensitive)                                               |
-| GET    | `/api/market/prices`                           | `LivePrice[]` (may be empty at startup)                                           |
+| GET    | `/api/market/prices?symbols=BTC,ETH`           | `LivePrice[]` (optional `symbols` filter; empty = all in memory)                  |
 | GET    | `/api/market/candles/:symbol?granularity=3600` | `{ symbol, granularity, candles: Candle[] }`, oldest first                        |
 
 `granularity` is in seconds: `60`, `300`, `900`, `3600` (default), `21600`, `86400`. Any other value returns 400.
